@@ -37,7 +37,7 @@ def get_config():
         return val.strip()
 
     gemini_key = _read_val("GEMINI_API_KEY")
-    gemini_model = _read_val("GEMINI_MODEL", "gemini-2.5-flash")
+    gemini_model = _read_val("GEMINI_MODEL", "gemini-3.8-flash")
     supabase_url = _read_val("SUPABASE_URL")
     supabase_key = _read_val("SUPABASE_KEY")
     return gemini_key, gemini_model, supabase_url, supabase_key
@@ -271,11 +271,15 @@ CRITICAL REQUIREMENT:
 
 {profile_text}"""
 
-    # Model candidates with automatic fallback
+    # Modern Gemini models with automatic multi-tier fallback
     candidate_models = [
-        preferred_model if preferred_model else "gemini-2.5-flash",
-        "gemini-2.0-flash",
-        "gemini-1.5-flash"
+        preferred_model if preferred_model else "gemini-3.8-flash",
+        "gemini-3.8-flash",
+        "gemini-3.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-pro"
     ]
     # Remove duplicates preserving order
     models_to_try = []
@@ -298,25 +302,33 @@ CRITICAL REQUIREMENT:
             last_error = api_err
             status_code = getattr(api_err, "code", None)
             err_msg = str(api_err)
-            # If invalid key or quota, fallback will not help; raise directly
-            if status_code in (400, 403) or "API_KEY_INVALID" in err_msg or "API key not valid" in err_msg:
-                raise RuntimeError("Invalid Gemini API key. Please verify your GEMINI_API_KEY in the .env file.")
+            
+            # Quota exceeded
             if status_code == 429 or "RESOURCE_EXHAUSTED" in err_msg:
                 raise RuntimeError("Gemini API quota or rate limit exceeded. Please wait a minute and retry.")
-            # For 404 Model Not Found, continue loop to try fallback models
-            if status_code == 404 or "NOT_FOUND" in err_msg:
+            
+            # Explicit key rejection
+            if status_code == 403 or "API_KEY_INVALID" in err_msg or "API key not valid" in err_msg:
+                raise RuntimeError("Invalid Gemini API key. Please check your GEMINI_API_KEY in the .env file.")
+            
+            # Model not found or high demand: try next model in fallback list
+            if status_code in (404, 503) or "NOT_FOUND" in err_msg or "UNAVAILABLE" in err_msg or "no longer available" in err_msg:
                 continue
+
+            # For other API errors, try next model before giving up
+            continue
+
         except Exception as general_err:
             last_error = general_err
             err_type = type(general_err).__name__
             err_msg = str(general_err)
             if "ConnectError" in err_type or "getaddrinfo" in err_msg or "timeout" in err_msg.lower():
                 raise RuntimeError("Network error: Unable to connect to the Gemini API. Please check your internet connection.")
-            raise RuntimeError(f"Generation failed: {err_msg}")
+            continue
 
     if not response or not response.text:
         if last_error:
-            raise RuntimeError(f"Could not generate response from Gemini API: {last_error}")
+            raise RuntimeError(f"Gemini API request failed: {last_error}")
         raise RuntimeError("Gemini returned an empty response. Please review your input and try again.")
 
     output_text = response.text.strip()
